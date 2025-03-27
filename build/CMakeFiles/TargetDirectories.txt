@@ -1,0 +1,3 @@
+/home/elen/cgal_offset/build/CMakeFiles/offset.dir
+/home/elen/cgal_offset/build/CMakeFiles/edit_cache.dir
+/home/elen/cgal_offset/build/CMakeFiles/rebuild_cache.dir

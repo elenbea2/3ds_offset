@@ -1,0 +1,182 @@
+// libraries
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
+#include <CGAL/Polyhedron_3.h> // represents polygonal solids
+#include <CGAL/Nef_polyhedron_3.h> // structure for boolean operations 
+#include <CGAL/Surface_mesh.h> // structure for 3d meshes
+#include <CGAL/Polygon_mesh_processing/compute_normal.h>
+#include <CGAL/Polygon_mesh_processing/transform.h>
+#include <CGAL/Aff_transformation_3.h>
+#include <CGAL/boost/graph/copy_face_graph.h> // copies one mesh type to another
+#include <boost/property_map/property_map.hpp>
+#include <CGAL/convex_decomposition_3.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <CGAL/squared_distance_3.h>
+#include <cstdlib>
+#include <CGAL/Polygon_mesh_processing/self_intersections.h> // detects self intersections
+
+typedef CGAL::Exact_predicates_exact_constructions_kernel Kernel;
+typedef Kernel::Point_3 Point_3;
+typedef Kernel::Vector_3 Vector_3;
+typedef CGAL::Polyhedron_3<Kernel> Polyhedron;
+typedef CGAL::Nef_polyhedron_3<Kernel> Nef_polyhedron;
+typedef CGAL::Surface_mesh<Point_3> Mesh;
+namespace PMP = CGAL::Polygon_mesh_processing;
+
+
+// function to remove thin regions
+// min thickness: determines the minimum distance between the faces
+void remove_thin_regions(Mesh& mesh, double min_thickness) {
+    std::vector<Mesh::Face_index> faces_to_remove;
+    
+    // runs through all faces of the mesh
+    for (auto f : mesh.faces()) {
+    
+        std::vector<Point_3> face_points;
+        
+        // get the points that form each face
+        for (auto v : CGAL::vertices_around_face(mesh.halfedge(f), mesh)) {
+            face_points.push_back(mesh.point(v));
+        }
+        
+        // ignores if isn't a valid polygon
+        if (face_points.size() < 3) continue;
+        
+        // begins with a very large number
+        double min_distance = std::numeric_limits<double>::max();
+        
+        // for each point, compares with the next ones and store the smallest distance found
+        for (size_t i = 0; i < face_points.size(); ++i) {
+            for (size_t j = i + 1; j < face_points.size(); ++j) {
+                double d = CGAL::to_double(CGAL::squared_distance(face_points[i], face_points[j]));
+                min_distance = std::min(min_distance, std::sqrt(d));
+            }
+        }
+        
+        // store the faces to be removed
+        if (min_distance < min_thickness) {
+            faces_to_remove.push_back(f);
+        }
+    }
+
+    // removes each face
+    for (auto f : faces_to_remove) {
+        CGAL::Euler::remove_face(mesh.halfedge(f), mesh);
+    }
+
+    std::cout << "Thin regions removed: " << faces_to_remove.size() << " faces." << std::endl;
+}
+
+
+// apply the offset to the mesh
+void offset_mesh(Mesh& mesh, double step, double offset_value, double min_thickness) {
+    std::map<Mesh::Vertex_index, Vector_3> vertex_normals;
+    
+    
+    std::cout << "Calculating vertex normal..." << std::endl;
+    
+    // calculates the vertex normal
+    for (auto v : mesh.vertices()) {
+        vertex_normals[v] = PMP::compute_vertex_normal(v, mesh);
+    }
+    
+    // initializes the offset number
+    double applied_offset = 0.0;
+    
+    // limit to avoid unnecessary applications
+    const double epsilon = 1e-10;
+    
+    // apply the offset iteratively
+    while (std::abs(applied_offset - offset_value) > epsilon) {
+
+        double current_step = std::min(step, std::abs(offset_value - applied_offset));
+        
+        // case for the negative offset
+        if (offset_value < 0) { current_step = -current_step; }
+        
+        // avoid unnecessary applications
+        if (std::abs(current_step) < epsilon) break; 
+        
+        std::cout << "Applying offset: " << current_step << std::endl;
+        
+        // apply the offset for each vertex
+        for (auto v : mesh.vertices()) {
+            Vector_3 normal = vertex_normals[v];
+  
+            double length = std::sqrt(CGAL::to_double(normal.squared_length()));
+            
+            // normalization
+            if (length > 0) {
+                normal = normal / length;
+            } else {
+                std::cerr << "Zero-length normal, ignoring normalization.\n";
+                continue;
+            }
+            
+            // calculates the new position of the point
+            Vector_3 offset_direction = (current_step > 0) ? normal : -normal;
+            mesh.point(v) = mesh.point(v) + offset_direction * std::abs(current_step);
+        }
+        
+        // checks for thin regions 
+        remove_thin_regions(mesh, min_thickness);
+        
+        // update the iterator
+        applied_offset += current_step;
+    }
+}
+
+// verifies if the polyhedron is valid
+bool is_valid_polyhedron(const Polyhedron& poly) {
+    return poly.is_valid() && !poly.empty();
+}
+
+
+int main(int argc, char* argv[]) {
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <offset> <model_file>" << std::endl;
+        return 1;
+    }
+
+    double offset_value;
+    try {
+        offset_value = std::stod(argv[1]);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: invalid offset value!" << std::endl;
+        return 1;
+    }
+    
+    std::string input_filename = argv[2];
+    std::ifstream input_model(input_filename);
+    Polyhedron P;
+    if (!input_model || !(input_model >> P) || P.empty()) {
+        std::cerr << "Error loading the model: " << input_filename << std::endl;
+        return 1;
+    }
+    input_model.close();
+    std::cout << "Model successfully loaded!" << std::endl;
+
+    Nef_polyhedron nef_P(P);
+    Polyhedron poly_offset;
+    Mesh mesh_part;
+    CGAL::copy_face_graph(P, mesh_part);
+
+    double step = 0.001; 
+    double min_thickness = 0.01; 
+    offset_mesh(mesh_part, step, offset_value, min_thickness);
+
+    CGAL::copy_face_graph(mesh_part, poly_offset);
+
+    if (!is_valid_polyhedron(poly_offset)) {
+        std::cerr << "Error: Invalid polyhedron after the offset!" << std::endl;
+        return 1;
+    }
+
+    std::ofstream debug_file("offset.off");
+    debug_file << poly_offset;
+    debug_file.close();
+    std::cout << "'offset.off' file successfully saved!" << std::endl;
+
+    return 0;
+}
