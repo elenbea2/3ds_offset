@@ -15,6 +15,11 @@
 #include <CGAL/squared_distance_3.h>
 #include <cstdlib>
 #include <CGAL/Polygon_mesh_processing/self_intersections.h> // detects self intersections
+#include <CGAL/Polygon_mesh_processing/stitch_borders.h> // Para fechar buracos
+#include <CGAL/Polygon_mesh_processing/repair.h> // Outras funções de reparo
+#include <CGAL/Polygon_mesh_processing/repair_degeneracies.h>
+#include <CGAL/Polygon_mesh_processing/triangulate_hole.h>
+#include <CGAL/Polygon_mesh_processing/remesh.h>
 
 typedef CGAL::Exact_predicates_exact_constructions_kernel Kernel;
 typedef Kernel::Point_3 Point_3;
@@ -25,47 +30,57 @@ typedef CGAL::Surface_mesh<Point_3> Mesh;
 namespace PMP = CGAL::Polygon_mesh_processing;
 
 
+
+void repair_mesh(Mesh& mesh) {
+    // Costura bordas para unir componentes desconectados
+    PMP::stitch_borders(mesh);
+
+    // Identifica e preenche buracos na malha
+    std::vector<Mesh::halfedge_index> border_cycles;
+    PMP::extract_boundary_cycles(mesh, std::back_inserter(border_cycles));
+
+    for (const auto& cycle : border_cycles) {
+        PMP::triangulate_hole(mesh, cycle);
+    }
+
+    // Remove faces quase degeneradas
+    PMP::remove_almost_degenerate_faces(mesh);
+
+    // Remove componentes conectados de tamanho negligenciável
+    PMP::remove_connected_components_of_negligible_size(mesh);
+}
+
+
 // function to remove thin regions
 // min thickness: determines the minimum distance between the faces
-void remove_thin_regions(Mesh& mesh, double min_thickness) {
+void remove_small_faces(Mesh& mesh, double min_area) {
     std::vector<Mesh::Face_index> faces_to_remove;
     
-    // runs through all faces of the mesh
     for (auto f : mesh.faces()) {
-    
         std::vector<Point_3> face_points;
-        
-        // get the points that form each face
+
         for (auto v : CGAL::vertices_around_face(mesh.halfedge(f), mesh)) {
             face_points.push_back(mesh.point(v));
         }
-        
-        // ignores if isn't a valid polygon
-        if (face_points.size() < 3) continue;
-        
-        // begins with a very large number
-        double min_distance = std::numeric_limits<double>::max();
-        
-        // for each point, compares with the next ones and store the smallest distance found
-        for (size_t i = 0; i < face_points.size(); ++i) {
-            for (size_t j = i + 1; j < face_points.size(); ++j) {
-                double d = CGAL::to_double(CGAL::squared_distance(face_points[i], face_points[j]));
-                min_distance = std::min(min_distance, std::sqrt(d));
-            }
+
+        if (face_points.size() < 3) continue; // Garante que seja um polígono válido
+
+        // Calcula a área da face usando a triangulação
+        double area = 0.0;
+        for (size_t i = 1; i + 1 < face_points.size(); ++i) {
+            area += std::sqrt(CGAL::to_double(CGAL::squared_area(face_points[0], face_points[i], face_points[i + 1])));
         }
-        
-        // store the faces to be removed
-        if (min_distance < min_thickness) {
+
+        if (area < min_area) {
             faces_to_remove.push_back(f);
         }
     }
 
-    // removes each face
     for (auto f : faces_to_remove) {
         CGAL::Euler::remove_face(mesh.halfedge(f), mesh);
     }
 
-    std::cout << "Thin regions removed: " << faces_to_remove.size() << " faces." << std::endl;
+    std::cout << "Small regions removed: " << faces_to_remove.size() << " faces." << std::endl;
 }
 
 
@@ -120,11 +135,14 @@ void offset_mesh(Mesh& mesh, double step, double offset_value, double min_thickn
         }
         
         // checks for thin regions 
-        remove_thin_regions(mesh, min_thickness);
+        remove_small_faces(mesh, min_thickness);
         
         // update the iterator
         applied_offset += current_step;
+      
+        repair_mesh(mesh);
     }
+    //repair_mesh(mesh);
 }
 
 // verifies if the polyhedron is valid
@@ -160,11 +178,14 @@ int main(int argc, char* argv[]) {
     Nef_polyhedron nef_P(P);
     Polyhedron poly_offset;
     Mesh mesh_part;
+    repair_mesh(mesh_part);
     CGAL::copy_face_graph(P, mesh_part);
+    
 
     double step = 0.001; 
     double min_thickness = 0.01; 
     offset_mesh(mesh_part, step, offset_value, min_thickness);
+
 
     CGAL::copy_face_graph(mesh_part, poly_offset);
 
